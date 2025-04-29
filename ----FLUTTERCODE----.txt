@@ -1,0 +1,578 @@
+----FLUTTERCODE----
+
+import 'dart:async';
+import 'dart:io';
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';  // For MediaType
+
+void main() {
+  runApp(DeepfakeDetectorApp());
+}
+
+class DeepfakeDetectorApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.dark(
+          primary: Colors.blueGrey[800]!,
+          secondary: Colors.tealAccent[400]!,
+          surface: Colors.blueGrey[900]!,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.tealAccent[400],
+            foregroundColor: Colors.blueGrey[900],
+            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            textStyle: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            elevation: 4,
+          ),
+        ),
+        cardTheme: CardTheme(
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          margin: EdgeInsets.all(12),
+        ),
+      ),
+      home: SplashScreen(),
+      routes: {
+        '/home': (context) => DeepfakeDetectorScreen(),
+        '/about': (context) => AboutDeepfakesScreen(),
+      },
+    );
+  }
+}
+
+class SplashScreen extends StatefulWidget {
+  @override
+  _SplashScreenState createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(seconds: 2),
+      vsync: this,
+    )..repeat(reverse: true);
+    _animation = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeInOut,
+    );
+
+    Timer(Duration(seconds: 3), () {
+      Navigator.pushReplacementNamed(context, '/home');
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.blueGrey[900]!,
+              Colors.black87,
+            ],
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ScaleTransition(
+                scale: _animation,
+                child: Image.asset(
+                  'assets/image/PV_logo_final.jpg',
+                  width: 180,
+                  height: 180,
+                ),
+              ),
+              SizedBox(height: 30),
+              Text(
+                'Deepfake Detector',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.tealAccent[400],
+                ),
+              ),
+              SizedBox(height: 10),
+              CircularProgressIndicator(
+                color: Colors.tealAccent[400],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class DeepfakeDetectorScreen extends StatefulWidget {
+  @override
+  _DeepfakeDetectorScreenState createState() => _DeepfakeDetectorScreenState();
+}
+
+class _DeepfakeDetectorScreenState extends State<DeepfakeDetectorScreen> {
+  XFile? _file;
+  Map<String, dynamic>? _result;
+  bool _isLoading = false;
+  String? _errorMessage;
+  final ImagePicker _picker = ImagePicker();
+
+  Future<void> _pickFile() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final pickedFile = await _picker.pickImage(source: ImageSource.gallery);
+      setState(() {
+        _file = pickedFile;
+        _result = null;
+      });
+    } catch (e) {
+      setState(() => _errorMessage = "Failed to pick image: ${e.toString()}");
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _detectDeepfake() async {
+    if (_file == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Please select an image first'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      // Read and validate the image file
+      final imageFile = File(_file!.path);
+      if (!await imageFile.exists()) {
+        throw Exception('Selected file does not exist');
+      }
+
+      final imageBytes = await imageFile.readAsBytes();
+      if (imageBytes.isEmpty) {
+        throw Exception('Selected file is empty');
+      }
+
+      final base64Image = base64Encode(imageBytes);
+      if (base64Image.isEmpty) {
+        throw Exception('Failed to encode image');
+      }
+
+      // Prepare the request
+      var url = Uri.parse('http://10.0.2.2:8000/predict');
+      var request = http.MultipartRequest('POST', url);
+
+      // Add the image file directly as multipart form data
+      request.files.add(await http.MultipartFile.fromPath(
+        'file',  // Must match FastAPI endpoint parameter name
+        _file!.path,
+        contentType: MediaType('image', 'jpeg'),  // Adjust for PNG if needed
+      ));
+
+      // Send the request
+      var streamedResponse = await request.send();
+      var response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        var result = json.decode(response.body);
+        setState(() => _result = {
+          'isFake': result['predicted_class'].toLowerCase() == 'fake',
+          'confidence': (result['confidence'] * 100).toDouble(),
+        });
+      } else if (response.statusCode == 422) {
+        var errorDetails = json.decode(response.body);
+        print('Validation Error Details: $errorDetails');
+        throw Exception('Invalid image format. Please try with a different image.');
+      } else {
+        throw Exception('Server error: ${response.statusCode}');
+      }
+    } catch (e) {
+      setState(() => _errorMessage = e.toString());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString()),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Widget _buildImagePreview() {
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Image.file(
+          File(_file!.path),
+          width: 250,
+          height: 250,
+          fit: BoxFit.cover,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Deepfake Detector'),
+        centerTitle: true,
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.info_outline),
+            onPressed: () => Navigator.pushNamed(context, '/about'),
+          ),
+        ],
+      ),
+      extendBodyBehindAppBar: true,
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              Colors.blueGrey[900]!,
+              Colors.black87,
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: SingleChildScrollView(
+          padding: EdgeInsets.all(20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(height: kToolbarHeight + 40),
+              Text(
+                'Detect Deepfake Content',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.tealAccent[400],
+                ),
+              ),
+              SizedBox(height: 10),
+              Text(
+                'Upload an image to analyze for potential manipulation',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.white70,
+                ),
+              ),
+              SizedBox(height: 40),
+
+              if (_errorMessage != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 20),
+                  child: Text(
+                    _errorMessage!,
+                    style: TextStyle(color: Colors.redAccent),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+
+              if (_file != null) ...[
+                _buildImagePreview(),
+                SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () => setState(() {
+                    _file = null;
+                    _result = null;
+                  }),
+                  child: Text('Clear Selection'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent,
+                  ),
+                ),
+                SizedBox(height: 20),
+              ],
+
+              if (_isLoading) ...[
+                Column(
+                  children: [
+                    CircularProgressIndicator(
+                      color: Colors.tealAccent[400],
+                    ),
+                    SizedBox(height: 20),
+                    Text(
+                      'Analyzing with your FastAPI server...',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 16,
+                      ),
+                    ),
+                    SizedBox(height: 10),
+                    Text(
+                      'This may take a few moments',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+                SizedBox(height: 40),
+              ] else ...[
+                ElevatedButton.icon(
+                  onPressed: _pickFile,
+                  icon: Icon(Icons.upload),
+                  label: Text('Upload Image'),
+                ),
+                SizedBox(height: 20),
+                if (_file != null)
+                  ElevatedButton.icon(
+                    onPressed: _detectDeepfake,
+                    icon: Icon(Icons.search),
+                    label: Text('Detect Deepfake'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blueGrey[800],
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+              ],
+
+              if (_result != null) ...[
+                SizedBox(height: 30),
+                Card(
+                  color: Colors.black.withOpacity(0.7),
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(
+                      color: _result!['isFake'] ? Colors.redAccent : Colors.green,
+                      width: 2,
+                    ),
+                  ),
+                  child: Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Icon(
+                          _result!['isFake'] ? Icons.warning : Icons.verified,
+                          color: _result!['isFake'] ? Colors.redAccent : Colors.green,
+                          size: 40,
+                        ),
+                        SizedBox(height: 10),
+                        Text(
+                          _result!['isFake'] ? '⚠ Potential Deepfake' : '✅ Likely Authentic',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                        SizedBox(height: 10),
+                        Text(
+                          'Confidence: ${_result!['confidence'].toStringAsFixed(1)}%',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 16,
+                          ),
+                        ),
+                        SizedBox(height: 10),
+                        LinearProgressIndicator(
+                          value: _result!['confidence'] / 100,
+                          backgroundColor: Colors.grey[800],
+                          color: _result!['isFake'] ? Colors.red : Colors.green,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+
+              SizedBox(height: 30),
+              TextButton(
+                onPressed: () => Navigator.pushNamed(context, '/about'),
+                child: Text(
+                  'Learn more about deepfakes',
+                  style: TextStyle(
+                    color: Colors.tealAccent[400],
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class AboutDeepfakesScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('About Deepfakes'),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      extendBodyBehindAppBar: true,
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              Colors.blueGrey[900]!,
+              Colors.black87,
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: SingleChildScrollView(
+          padding: EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(height: kToolbarHeight + 20),
+              Center(
+                child: Text(
+                  'Understanding Deepfakes',
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.tealAccent[400],
+                  ),
+                ),
+              ),
+              SizedBox(height: 30),
+
+              _buildInfoCard(
+                icon: Icons.whatshot,
+                title: 'What are Deepfakes?',
+                content: 'Deepfakes are synthetic media where a person\'s appearance or voice is manipulated using artificial intelligence and deep learning techniques to create realistic but fake content.',
+              ),
+
+              _buildInfoCard(
+                icon: Icons.warning,
+                title: 'Potential Risks',
+                content: '• Spread of misinformation\n• Identity theft and fraud\n• Reputation damage\n• Political manipulation\n• Erosion of trust in media',
+              ),
+
+              _buildInfoCard(
+                icon: Icons.visibility,
+                title: 'How to Spot Deepfakes',
+                content: '• Unnatural eye movements\n• Strange lighting or shadows\n• Inconsistent facial expressions\n• Awkward head positioning\n• Unusual blinking patterns\n• Audio-visual mismatches',
+              ),
+
+              _buildInfoCard(
+                icon: Icons.security,
+                title: 'Protecting Yourself',
+                content: '• Verify sources before sharing content\n• Be skeptical of sensational media\n• Use trusted verification tools\n• Educate others about deepfakes\n• Report suspected deepfakes to platforms',
+              ),
+
+              SizedBox(height: 30),
+              Center(
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text('Back to Detector'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoCard({required IconData icon, required String title, required String content}) {
+    return Card(
+      color: Colors.black.withOpacity(0.7),
+      elevation: 4,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      margin: EdgeInsets.only(bottom: 20),
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, color: Colors.tealAccent[400], size: 28),
+                SizedBox(width: 10),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 10),
+            Text(
+              content,
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.white70,
+                height: 1.5,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
